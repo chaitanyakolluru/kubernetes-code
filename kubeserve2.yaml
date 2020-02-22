@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeserve-deployment
+spec:
+  selector:
+    matchLabels:
+      app: kubeserve
+  replicas: 3
+  template:
+    metadata:
+      name: kubeserve-deployment
+      labels:
+        app: kubeserve
+    spec:
+      containers:
+      - name: cont1
+        image: chadmcrowell/kubeserve2
+        ports:
+        - containerPort: 8080
+---
+
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubeserve-service
+spec:
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP

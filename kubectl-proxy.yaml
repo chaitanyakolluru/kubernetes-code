@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kubectl-proxy
+  namespace: myns
+spec:
+  containers:
+  - name: cont1
+    image: chadmcrowell/kubectl-proxy
