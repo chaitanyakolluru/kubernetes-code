@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: Pod
-metadata:
-  name: redhat7
-spec:
-  containers:
-  - image: yjjy0921/redhat7.2
-    name: rhel7-1
