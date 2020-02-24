@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: configmap-volume
+  namespace: practice3
+spec:
+  containers:
+  - name: configmapvolumepod
+    image: busybox
+    args:
+    - sleep
+    - "9999"
+    volumeMounts:
+    - name: configvol
+      mountPath: /etc/config
+  volumes:
+  - name: configvol
+    configMap:
+      name: app

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-pvc
+  namespace: practice3
+spec:
+  containers:
+  - name: busybox
+    image: busybox
+    volumeMounts:
+    - name: pvc-vol
+      mountPath: /data/kkk
+  volumes:
+  - name: pvc-vol
+    persistentVolumeClaim:
+      claimName: pod-with-pvc-pvc

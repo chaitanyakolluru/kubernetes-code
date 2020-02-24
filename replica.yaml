@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: replica
+  labels:
+    app: replica
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: replica
+  template:
+    metadata:
+      name: replica
+      labels:
+        app: replica
+    spec:
+      containers:
+      - name: gg
+        image: linuxacademycontent/kubeserve:v1
+

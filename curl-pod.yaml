@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: curlpod
   namespace: web
+  name: curlpod
 spec:
   containers:
-  - image: tutum/curl
+  - name: main
+    image: radial/busyboxplus:curl 
     command: ["sleep","999999"]
-    name: main
-  - image: linuxacademycontent/kubectl-proxy
-    name: proxy
+  - name: proxy
+    image: linuxacademycontent/kubectl-proxy
   restartPolicy: Always

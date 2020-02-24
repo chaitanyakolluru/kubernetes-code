@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: stateful
+  labels:
+    app: stateful
+spec:
+  serviceName: stateful
+  selector:
+    matchLabels:
+      app: stateful
+  replicas: 3
+  template:
+    metadata:
+      name: stateful
+      labels:
+        app: stateful
+    spec:
+      containers:
+      - name: stateful
+        image: nginx
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: stateful
+          mountPath: /usr/share/nginx/html
+  volumeClaimTemplates:
+  - metadata:
+      name: stateful
+    spec:
+      storageClassName: local-storage
+      accessModes: ['ReadWriteOnce']
+      resources:
+        requests:
+          storage: 100Mi
+
+---
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: 

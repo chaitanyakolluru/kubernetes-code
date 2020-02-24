@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: rep
+  namespace: practice3
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: rep
+  template:
+    metadata:
+      labels:
+        app: rep
+    spec:
+      containers:
+      - name: jj
+        image: linuxacademycontent/kubeserve
+

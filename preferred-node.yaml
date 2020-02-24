@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: preferred-node-pod
+  namespace: practice3
+spec:
+ affinity:
+   nodeAffinity:
+     preferredDuringSchedulingIgnoredDuringExecution:
+     - weight: 100
+       preference:
+         matchExpressions:
+         - key: availability-zone
+           operator: In
+           values:
+           - zone3
+ containers:
+ - name: preferred-node-pod
+   image: busybox
+   args:
+   - sleep
+   - "9999"
+

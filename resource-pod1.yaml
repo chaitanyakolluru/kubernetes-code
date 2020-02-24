@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: resource-pod1
+spec:
+  nodeSelector:
+  containers:
+  - image: busybox
+    command: ["dd", "if=/dev/zero", "of=/dev/null"]
+    name: pod1
+    resources:
+      requests:
+        cpu: 80m
+        memory: 20Mi

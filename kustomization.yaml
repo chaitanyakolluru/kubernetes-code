@@ -1,0 +1,35 @@
+configMapGenerator:
+- name: example-configmap-1
+  files:
+  - application.properties
+- name: example-configmap-2
+  literals:
+  - GOO=BAGG
+
+secretGenerator:
+- name: example-secret-1
+  files:
+  - password.txt
+
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    type: generated
+  annotations:
+    type: generated
+
+namespace: my-namespace
+namePrefix: dev-
+nameSuffix: "-001"
+commonLabels:
+  app: bingo
+commonAnnotations:
+  oncallName: chaitanya
+resources:
+- nginx-deployment.yaml
+
+resources:
+- nginx-deployment.yaml
+patchesStrategicMerge:
+- increase_replicas.yaml
+- set_memory.yaml

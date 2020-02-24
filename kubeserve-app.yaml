@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeserve-deployment
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: kubeserve-deployment
+  template:
+    metadata:
+      name: kubeserve-deployment
+      labels:
+        app: kubeserve-deployment
+    spec:
+      containers:
+      - name: kk
+        image: linuxacademycontent/kubeserve:v1
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubeserve-service
+spec:
+  type: NodePort
+  selector:
+    app: kubeserve-deployment
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+    nodePort: 30088
