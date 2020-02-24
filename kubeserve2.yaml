@@ -27,6 +27,6 @@ metadata:
   name: kubeserve-service
 spec:
   ports:
-  - port: 8080
+  - port: 8091
     targetPort: 8080
     protocol: TCP
