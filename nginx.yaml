@@ -5,7 +5,7 @@ metadata:
   labels:
     app: nginx-deployment
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: nginx-deployment
@@ -20,6 +20,10 @@ spec:
         image: nginx
         ports:
         - containerPort: 80
+        livenessProbe:
+          initialDelaySeconds: 10
+          httpGet:
+            port: 80
 
 ---
 
