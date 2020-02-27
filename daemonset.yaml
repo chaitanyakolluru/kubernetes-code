@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ds1
+  labels:
+    app: ds1
+spec:
+  selector:
+    matchLabels:
+      app: ds1
+  template:
+    metadata:
+      name: ds1
+      labels:
+        app: ds1
+    spec:
+      nodeSelector:
+        node: worker1
+      containers:
+      - name: cont1
+        image: busybox:1.28
+        args:
+        - sleep
+        - "36000"
