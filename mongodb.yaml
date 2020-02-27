@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mongodb
+spec:
+  containers:
+  - name: cont1
+    image: mongo
+    volumeMounts:
+    - name: vol
+      mountPath: /data/db
+    ports:
+    - containerPort: 27017
+      protocol: TCP
+  volumes:
+  - name: vol
+    persistentVolumeClaim:
+      claimName: mongo-pvc
+
+
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongo-pvc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: "local-storage"
+  resources:
+    requests:
+      storage: 256Mi
+
+
+---
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mongo-pv
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: ""
+  capacity:
+    storage: 256Mi
+  hostPath:
+    path: /var/tmp
