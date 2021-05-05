@@ -1,0 +1,51 @@
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ubuntu-puppet-agent
+  labels:
+    app: ubuntu-puppet-agent
+spec:
+  serviceName: ubuntu-puppet-agent
+  replicas: 10
+  selector:
+    matchLabels:
+      app: ubuntu-puppet-agent
+  template:
+    metadata:
+      name: ubuntu-puppet-agent
+      labels:
+        app: ubuntu-puppet-agent
+    spec:
+      restartPolicy: Always
+      containers:
+      - name: cont1
+        image: chaitanyah368/ubuntu-puppet-agent:latest
+        command: ["/bin/sh","-c","/opt/puppetlabs/puppet/bin/puppet config set server puppetserver-svc.default.svc.cluster.local --section master && \
+                    /opt/puppetlabs/puppet/bin/puppet config set certname ubuntu-puppet-agent --section master && \
+                    /opt/puppetlabs/puppet/bin/puppet config set server puppetserver-svc.default.svc.cluster.local --section agent && \
+                    /opt/puppetlabs/puppet/bin/puppet config set certname ubuntu-puppet-agent --section agent && \
+                    ln -s /opt/puppetlabs/puppet/bin/puppet /usr/local/bin/puppet && \
+                    puppet agent -t"]
+        # lifecycle:
+        #   postStart:
+        #     exec:
+        #       command: ["/bin/sh","-c","/opt/puppetlabs/puppet/bin/puppet config set server puppetserver-svc.default.svc.cluster.local --section master && \
+        #                   /opt/puppetlabs/puppet/bin/puppet config set certname ubuntu-puppet-agent --section master && \
+        #                   /opt/puppetlabs/puppet/bin/puppet config set server puppetserver-svc.default.svc.cluster.local --section agent && \
+        #                   /opt/puppetlabs/puppet/bin/puppet config set certname ubuntu-puppet-agent --section agent && \
+        #                   ln -s /opt/puppetlabs/puppet/bin/puppet /usr/local/bin/puppet && \
+        #                   puppet agent -t"]
+      initContainers:
+      - name: wait-for-puppetserver-svc
+        image: radial/busyboxplus:curl
+        args:
+        - /bin/sh
+        - -c
+        - >
+          set -x;
+          while [ $(curl -sw --max-time 3 '%{http_code}' "http://puppetserver-svc.default.svc.cluster.local:8140" -o /dev/null) -ne 000 ]; do
+            sleep 15;
+          done
+      

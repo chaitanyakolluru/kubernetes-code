@@ -1,0 +1,114 @@
+
+##  kc create secret generic ghe-auth --from-literal=username=username --from-literal=token=token
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: puppetserver-deployment
+  labels:
+    app: puppetserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: puppetserver
+  template:
+    metadata:
+      name: puppetserver-deployment
+      labels:
+        app: puppetserver
+    spec:
+      containers:
+      - name: cont
+        image: chaitanyah368/ubuntu-puppetserver:latest
+        command: ["/bin/sh"]
+        args: ["-c","sleep 9999"]
+        resources:
+          requests:
+            cpu: 1000m
+            memory: 2048Mi
+          limits:
+            cpu: 1000m
+            memory: 2048Mi
+        readinessProbe:
+          exec:
+            command: ["/bin/sh","-c","netstat -ntulp | grep 8140 > /dev/null 2>&1"]
+        livenessProbe:
+          exec:
+            command: ["/bin/sh","-c","netstat -ntulp | grep 8140 > /dev/null 2>&1"]
+          initialDelaySeconds: 30
+          periodSeconds: 60
+        volumeMounts:
+        - name: sec-vol
+          mountPath: /etc/secrets
+          readOnly: true
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh","-c","/opt/puppetlabs/puppet/bin/puppet config set dns_alt_names ${HOSTNAME}.default.svc.cluster.local,puppetserver-svc.default.svc.cluster.local --section server && \
+                        echo \"*\" >> /etc/puppetlabs/puppet/autosign.conf && \
+                        apt-get install -y git && \
+                        cd /etc/ && \
+                        git clone https://$(cat /etc/secrets/username):$(cat /etc/secrets/token)@ghe.aa.com/aot-puppet-lab/lab-control-repo.git && \
+                        mv /etc/lab-control-repo/* /etc/puppetlabs/code/environments/production/ && \
+                        mv /etc/lab-control-repo/.git /etc/puppetlabs/code/environments/production/ && \
+                        rm -rf /etc/lab-control-repo/ && \
+                        service puppetserver restart"]
+      volumes:
+      - name: sec-vol
+        secret:
+          secretName: ghe-auth
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: puppetserver-svc
+spec:
+  selector:
+    app: puppetserver
+  type: ClusterIP
+  ports:
+  - port: 8140
+    protocol: TCP
+    targetPort: 8140
+
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ubuntu-puppet-agent
+spec:
+  restartPolicy: Never
+  containers:
+  - name: cont1
+    image: chaitanyah368/ubuntu-puppet-agent:latest
+    command: ["/bin/sh","-c","/opt/puppetlabs/puppet/bin/puppet config set server puppetserver-svc.default.svc.cluster.local --section master && \
+                /opt/puppetlabs/puppet/bin/puppet config set certname ubuntu-puppet-agent --section master && \
+                /opt/puppetlabs/puppet/bin/puppet config set server puppetserver-svc.default.svc.cluster.local --section agent && \
+                /opt/puppetlabs/puppet/bin/puppet config set certname ubuntu-puppet-agent --section agent && \
+                ln -s /opt/puppetlabs/puppet/bin/puppet /usr/local/bin/puppet && \
+                sleep 99999"]
+    # lifecycle:
+    #   postStart:
+    #     exec:
+    #       command: ["/bin/sh","-c","/opt/puppetlabs/puppet/bin/puppet config set server puppetserver-svc.default.svc.cluster.local --section master && \
+    #                   /opt/puppetlabs/puppet/bin/puppet config set certname ubuntu-puppet-agent --section master && \
+    #                   /opt/puppetlabs/puppet/bin/puppet config set server puppetserver-svc.default.svc.cluster.local --section agent && \
+    #                   /opt/puppetlabs/puppet/bin/puppet config set certname ubuntu-puppet-agent --section agent && \
+    #                   ln -s /opt/puppetlabs/puppet/bin/puppet /usr/local/bin/puppet && \
+    #                   puppet agent -t"]
+  initContainers:
+  - name: wait-for-puppetserver-svc
+    image: radial/busyboxplus:curl
+    args:
+    - /bin/sh
+    - -c
+    - >
+      set -x;
+      while [ $(curl -sw --max-time 3 '%{http_code}' "http://puppetserver-svc.default.svc.cluster.local:8140" -o /dev/null) -ne 000 ]; do
+        sleep 15;
+      done
+   
