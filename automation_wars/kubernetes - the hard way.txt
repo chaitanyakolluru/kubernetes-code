@@ -1,0 +1,1796 @@
+ https://github.com/kelseyhightower/kubernetes-the-hard-way
+
+intro:
+
+	using 6 total cloud servers:
+	2 controllers
+	2 workers
+	1 kube api load balancer and 1 remote kubectl workstation to 
+	connect to the cluster.
+
+	controllers
+		- etcd
+		- kube-apiserver
+		- nginx (healthz endpoint exposed to 80)
+		- kube-controller-manager
+		- kube-scheduler
+		
+	workers
+		- containerd
+		- kubelet - kubernetes worker node client basically.
+		- kube-proxy -deals with networking bw the two worker nodes.
+		
+	kube api load balancer will be hit by the remote kubectl to connect
+	to and issue commands to the cluster.
+
+client tools:
+	In order to proceed with Kubernetes the Hard Way, there are some client tools that you need to install on your local workstation. 
+	These include cfssl and kubectl. This lesson introduces these tools and guides you through the process of installing them. 
+	After completing this lesson, you should have cfssl and kubectl installed correctly on your workstation.
+
+	You can find more information on how to install these tools, as well as instructions for OS X/Linux, here: https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/02-client-tools.md
+
+	Commands used in the demo to install the client tools in a Linux environment:
+
+	cfssl:
+
+	wget -q --show-progress --https-only --timestamping \
+	  https://pkg.cfssl.org/R1.2/cfssl_linux-amd64 \
+	  https://pkg.cfssl.org/R1.2/cfssljson_linux-amd64
+	chmod +x cfssl_linux-amd64 cfssljson_linux-amd64
+	sudo mv cfssl_linux-amd64 /usr/local/bin/cfssl
+	sudo mv cfssljson_linux-amd64 /usr/local/bin/cfssljson
+	cfssl version
+
+	If you want to work on an i386 machine, use these commands to install cfssl instead:
+
+	wget -q --show-progress --https-only --timestamping \
+	  https://pkg.cfssl.org/R1.2/cfssl_linux-386 \
+	  https://pkg.cfssl.org/R1.2/cfssljson_linux-386
+	chmod +x cfssl_linux-386 cfssljson_linux-386
+	sudo mv cfssl_linux-386 /usr/local/bin/cfssl
+	sudo mv cfssljson_linux-386 /usr/local/bin/cfssljson
+	cfssl version
+
+	kubectl:
+
+	wget https://storage.googleapis.com/kubernetes-release/release/v1.16.3/bin/linux/amd64/kubectl
+	chmod +x kubectl
+	sudo mv kubectl /usr/local/bin/
+	kubectl version --client **use --client flag to ensure kubectl client binary version is returned.
+
+
+
+why ca and tls
+	cert used to confirm identity.
+	ca confirms that a certificate is valid.
+	client certs - provides authentication to various users: admin, kube-controller-manager, kube-proxy, kube-scheduler and kubelet client
+	kubernetes api server certificate - tls cert for kubernetes api
+	service account key apir - kube uses a cert to sign service account tokens, so we need to provide a cert for that purpose.
+	
+provision ca:
+	In order to generate the certificates needed by Kubernetes, you must first provision a certificate authority. This lesson will guide you through the process of provisioning a new certificate authority for your Kubernetes cluster.
+	After completing this lesson, you should have a certificate authority, which consists of two files: ca-key.pem and ca.pem.
+
+	Here are the commands used in the demo:
+
+	cd ~/
+	mkdir kthw
+	cd kthw/
+
+	UPDATE: cfssljson and cfssl will need to be installed. To install, complete the following commands:
+
+	sudo curl -s -L -o /bin/cfssl https://pkg.cfssl.org/R1.2/cfssl_linux-amd64
+	sudo curl -s -L -o /bin/cfssljson https://pkg.cfssl.org/R1.2/cfssljson_linux-amd64
+	sudo curl -s -L -o /bin/cfssl-certinfo https://pkg.cfssl.org/R1.2/cfssl-certinfo_linux-amd64
+	sudo chmod +x /bin/cfssl*
+
+	Use this command to generate the certificate authority. Include the opening and closing curly braces to run this entire block as a single command.
+
+	cat > ca-config.json << EOF
+	{
+	  "signing": {
+		"default": {
+		  "expiry": "8760h"
+		},
+		"profiles": {
+		  "kubernetes": {
+			"usages": ["signing", "key encipherment", "server auth", "client auth"],
+			"expiry": "8760h"
+		  }
+		}
+	  }
+	}
+	EOF
+
+	cat > ca-csr.json << EOF
+	{
+	  "CN": "Kubernetes",
+	  "key": {
+		"algo": "rsa",
+		"size": 2048
+	  },
+	  "names": [
+		{
+		  "C": "US",
+		  "L": "Portland",
+		  "O": "Kubernetes",
+		  "OU": "CA",
+		  "ST": "Oregon"
+		}
+	  ]
+	}
+	EOF
+
+	cfssl gencert -initca ca-csr.json | cfssljson -bare ca
+
+	}
+	$ ls -ltr
+	total 20
+	-rw-rw-r-- 1 cloud_user cloud_user  230 Dec  5 15:20 ca-config.json
+	-rw-rw-r-- 1 cloud_user cloud_user  211 Dec  5 15:24 ca-csr.json
+	-rw-rw-r-- 1 cloud_user cloud_user 1367 Dec  5 15:25 ca.pem**
+	-rw------- 1 cloud_user cloud_user 1675 Dec  5 15:25 ca-key.pem**
+	-rw-r--r-- 1 cloud_user cloud_user 1005 Dec  5 15:25 ca.csr
+	
+	ca-key.pem is private cert for ca
+	ca.pem is public cert for ca
+	ca.pem will need to be placed in multiple locations so those components can have the public ca cert to authenticate entities attempting to authenticate to it.
+	
+generate client certificates:
+	Now that you have provisioned a certificate authority for the Kubernetes cluster, you are ready to begin generating certificates. 
+	The first set of certificates you will need to generate consists of the client certificates used by various Kubernetes components.
+	In this lesson, we will generate the following client certificates: admin (for admin access), kubelet (kubernetes client on worker nodes)(one for each worker node), kube-controller-manager (on the controller nodes), kube-proxy (on the worker nodes), and kube-scheduler (on the controller nodes). After completing this lesson, you will have the client certificate files which you will need later to set up the cluster.
+
+	Here are the commands used in the demo. The command blocks surrounded by curly braces can be entered as a single command:
+
+	cd ~/kthw
+
+	Admin Client certificate:
+
+	{
+
+	cat > admin-csr.json << EOF
+	{
+	  "CN": "admin",
+	  "key": {
+		"algo": "rsa",
+		"size": 2048
+	  },
+	  "names": [
+		{
+		  "C": "US",
+		  "L": "Portland",
+		  "O": "system:masters",
+		  "OU": "Kubernetes The Hard Way",
+		  "ST": "Oregon"
+		}
+	  ]
+	}
+	EOF
+
+	*this is why admin user can access cluster as admin; because O in the csr is system:masters.
+	$ kubectl get clusterrolebindings cluster-admin -o yaml
+	apiVersion: rbac.authorization.k8s.io/v1
+	kind: ClusterRoleBinding
+	metadata:
+	  annotations:
+		rbac.authorization.kubernetes.io/autoupdate: "true"
+	  creationTimestamp: "2020-01-01T00:04:59Z"
+	  labels:
+		kubernetes.io/bootstrapping: rbac-defaults
+	  name: cluster-admin
+	  resourceVersion: "112"
+	  selfLink: /apis/rbac.authorization.k8s.io/v1/clusterrolebindings/cluster-admin
+	  uid: 5984b62e-2c2a-11ea-832a-06bd4e919624
+	roleRef:
+	  apiGroup: rbac.authorization.k8s.io
+	  kind: ClusterRole
+	  name: cluster-admin
+	subjects:
+	- apiGroup: rbac.authorization.k8s.io
+	  kind: Group
+	  name: system:masters
+
+
+	cfssl gencert \
+	  -ca=ca.pem \
+	  -ca-key=ca-key.pem \
+	  -config=ca-config.json \
+	  -profile=kubernetes \
+	  admin-csr.json | cfssljson -bare admin
+
+	}
+
+	Kubelet Client certificates. Be sure to enter your actual cloud server values for all four of the variables at the top:
+
+	WORKER0_HOST=<Public hostname of your first worker node cloud server>
+	WORKER0_IP=<Private IP of your first worker node cloud server>
+	WORKER1_HOST=<Public hostname of your second worker node cloud server>
+	WORKER1_IP=<Private IP of your second worker node cloud server>
+
+	{
+	cat > ${WORKER0_HOST}-csr.json << EOF
+	{
+	  "CN": "system:node:${WORKER0_HOST}",
+	  "key": {
+		"algo": "rsa",
+		"size": 2048
+	  },
+	  "names": [
+		{
+		  "C": "US",
+		  "L": "Portland",
+		  "O": "system:nodes",
+		  "OU": "Kubernetes The Hard Way",
+		  "ST": "Oregon"
+		}
+	  ]
+	}
+	EOF
+
+	cfssl gencert \
+	  -ca=ca.pem \
+	  -ca-key=ca-key.pem \
+	  -config=ca-config.json \
+	  -hostname=${WORKER0_IP},${WORKER0_HOST} \
+	  -profile=kubernetes \
+	  ${WORKER0_HOST}-csr.json | cfssljson -bare ${WORKER0_HOST}
+
+	cat > ${WORKER1_HOST}-csr.json << EOF
+	{
+	  "CN": "system:node:${WORKER1_HOST}",
+	  "key": {
+		"algo": "rsa",
+		"size": 2048
+	  },
+	  "names": [
+		{
+		  "C": "US",
+		  "L": "Portland",
+		  "O": "system:nodes",
+		  "OU": "Kubernetes The Hard Way",
+		  "ST": "Oregon"
+		}
+	  ]
+	}
+	EOF
+
+	cfssl gencert \
+	  -ca=ca.pem \
+	  -ca-key=ca-key.pem \
+	  -config=ca-config.json \
+	  -hostname=${WORKER1_IP},${WORKER1_HOST} \
+	  -profile=kubernetes \
+	  ${WORKER1_HOST}-csr.json | cfssljson -bare ${WORKER1_HOST}
+
+	}
+	**so this creates a **.csr, **.pem and **-key.pem files from **-csr.json on running the cfssl gencert command. 
+
+	Controller Manager Client certificate:
+
+	{
+
+	cat > kube-controller-manager-csr.json << EOF
+	{
+	  "CN": "system:kube-controller-manager",
+	  "key": {
+		"algo": "rsa",
+		"size": 2048
+	  },
+	  "names": [
+		{
+		  "C": "US",
+		  "L": "Portland",
+		  "O": "system:kube-controller-manager",
+		  "OU": "Kubernetes The Hard Way",
+		  "ST": "Oregon"
+		}
+	  ]
+	}
+	EOF
+
+	cfssl gencert \
+	  -ca=ca.pem \
+	  -ca-key=ca-key.pem \
+	  -config=ca-config.json \
+	  -profile=kubernetes \
+	  kube-controller-manager-csr.json | cfssljson -bare kube-controller-manager
+
+	}
+
+	Kube Proxy Client certificate:
+
+	{
+
+	cat > kube-proxy-csr.json << EOF
+	{
+	  "CN": "system:kube-proxy",
+	  "key": {
+		"algo": "rsa",
+		"size": 2048
+	  },
+	  "names": [
+		{
+		  "C": "US",
+		  "L": "Portland",
+		  "O": "system:node-proxier",
+		  "OU": "Kubernetes The Hard Way",
+		  "ST": "Oregon"
+		}
+	  ]
+	}
+	EOF
+
+	cfssl gencert \
+	  -ca=ca.pem \
+	  -ca-key=ca-key.pem \
+	  -config=ca-config.json \
+	  -profile=kubernetes \
+	  kube-proxy-csr.json | cfssljson -bare kube-proxy
+
+	}
+
+	Kube Scheduler Client Certificate:
+
+	{
+
+	cat > kube-scheduler-csr.json << EOF
+	{
+	  "CN": "system:kube-scheduler",
+	  "key": {
+		"algo": "rsa",
+		"size": 2048
+	  },
+	  "names": [
+		{
+		  "C": "US",
+		  "L": "Portland",
+		  "O": "system:kube-scheduler",
+		  "OU": "Kubernetes The Hard Way",
+		  "ST": "Oregon"
+		}
+	  ]
+	}
+	EOF
+
+	cfssl gencert \
+	  -ca=ca.pem \
+	  -ca-key=ca-key.pem \
+	  -config=ca-config.json \
+	  -profile=kubernetes \
+	  kube-scheduler-csr.json | cfssljson -bare kube-scheduler
+
+	}
+	
+	**the certs for teh worker nodes will be used by kubelet on the individual worker nodes.
+	** these are all client side: kubelet on worker nodes, kube-controller-manager, kube-proxy ad kube-scheduler.
+	
+	**as the kubelet is not installed on the controller nodes, ithey both will not show up on the kubectl get nodes
+	at the end. to have them show up as master nodes in the output, im going to install and configure kubelet on the controller nodes as well.
+	so here, im creating certs for kubelet on the controller nodes too. and will setup config for anything that needs to be done on the controller nodes
+	so as to have kubelet setup and working correctly on them as well.
+
+generating kubernetes api server cert:
+	*10.32.0.1 - customary ip that pods in the cluster might use.
+		
+	We have generated all of the the client certificates our Kubernetes cluster will need, but we also need a server certificate for the Kubernetes API. 
+	In this lesson, we will generate one, signed with all of the hostnames and IPs that may be used later in order to access the Kubernetes API.
+	After completing this lesson, you will have a Kubernetes API server certificate in the form of two files called kubernetes-key.pem and kubernetes.pem.
+
+	Here are the commands used in the demo. Be sure to replace all the placeholder values in CERT_HOSTNAME with their real values from your cloud servers:
+
+	cd ~/kthw
+	CERT_HOSTNAME=10.32.0.1,<controller node 1 Private IP>,<controller node 1 hostname>,<controller node 2 Private IP>,<controller node 2 hostname>,<API load balancer Private IP>,<API load balancer hostname>,127.0.0.1,localhost,kubernetes.default
+
+	{
+
+	cat > kubernetes-csr.json << EOF
+	{
+	  "CN": "kubernetes",
+	  "key": {
+		"algo": "rsa",
+		"size": 2048
+	  },
+	  "names": [
+		{
+		  "C": "US",
+		  "L": "Portland",
+		  "O": "Kubernetes",
+		  "OU": "Kubernetes The Hard Way",
+		  "ST": "Oregon"
+		}
+	  ]
+	}
+	EOF
+
+	cfssl gencert \
+	  -ca=ca.pem \
+	  -ca-key=ca-key.pem \
+	  -config=ca-config.json \
+	  -hostname=${CERT_HOSTNAME} \
+	  -profile=kubernetes \
+	  kubernetes-csr.json | cfssljson -bare kubernetes
+
+	}
+
+generating the service account key pair:
+	*kube needs a key pair to sign tokens created for service accounts.
+
+	Kubernetes provides the ability for service accounts to authenticate using tokens. It uses a key-pair to provide signatures for those tokens. 
+	In this lesson, we will generate a certificate that will be used as that key-pair. After completing this lesson, you will have a certificate ready to be used as a service account key-pair in the form of two files: service-account-key.pem and service-account.pem.
+
+	Here are the commands used in the demo:
+
+	cd ~/kthw
+
+	{
+
+	cat > service-account-csr.json << EOF
+	{
+	  "CN": "service-accounts",
+	  "key": {
+		"algo": "rsa",
+		"size": 2048
+	  },
+	  "names": [
+		{
+		  "C": "US",
+		  "L": "Portland",
+		  "O": "Kubernetes",
+		  "OU": "Kubernetes The Hard Way",
+		  "ST": "Oregon"
+		}
+	  ]
+	}
+	EOF
+
+	cfssl gencert \
+	  -ca=ca.pem \
+	  -ca-key=ca-key.pem \
+	  -config=ca-config.json \
+	  -profile=kubernetes \
+	  service-account-csr.json | cfssljson -bare service-account
+
+	}
+
+distribute the cert files:
+	Now that all of the necessary certificates have been generated, we need to move the files onto the appropriate servers. 
+	In this lesson, we will copy the necessary certificate files to each of our cloud servers. After completing this lesson, your controller and worker nodes should each have the certificate files which they need.
+
+	Here are the commands used in the demo. Be sure to replace the placeholders with the actual values from from your cloud servers.
+
+	Move certificate files to the worker nodes:
+
+	scp ca.pem <worker 1 hostname>-key.pem <worker 1 hostname>.pem user@<worker 1 public IP>:~/
+	scp ca.pem <worker 2 hostname>-key.pem <worker 2 hostname>.pem user@<worker 2 public IP>:~/
+
+	Move certificate files to the controller nodes:
+
+	scp ca.pem ca-key.pem kubernetes-key.pem kubernetes.pem \
+		service-account-key.pem service-account.pem user@<controller 1 public IP>:~/
+	scp ca.pem ca-key.pem kubernetes-key.pem kubernetes.pem \
+		service-account-key.pem service-account.pem user@<controller 2 public IP>:~/
+
+	**admin, scheduler and controller-manager and kube-proxy havent been moved anywhere; they would be used locally to generate kubeconfigs.
+	
+kubeconfigs ??
+	a kubernetes configuration file is a file that stores information about clusters, users, namespaces and authentication mechanisms. 
+	contains configuration data needed to connect to and interact with one or more kubernetes clusters.
+	
+	that kubectl cofnig view output or ~/.kube/config file.
+	
+generating kubeconfigs for the cluster:
+	using command kubectl
+	we are generating kubeconfigs for the individual services to reach api server on the load balancer.
+	The next step in building a Kubernetes cluster the hard way is to generate kubeconfigs which will be used by the various services that will make up the cluster. In this lesson, we will generate these kubeconfigs. 
+	After completing this lesson, you should have a set of kubeconfigs which you will need later in order to configure the Kubernetes cluster.
+
+	Here are the commands used in the demo. Be sure to replace the placeholders with actual values from your cloud servers.
+
+	Create an environment variable to store the address of the Kubernetes API, and set it to the private IP of your load balancer cloud server:
+
+	KUBERNETES_ADDRESS=<load balancer private ip>
+
+	Generate a kubelet kubeconfig for each worker node:
+
+	for instance in <worker 1 hostname> <worker 2 hostname>; do
+	  kubectl config set-cluster kubernetes-the-hard-way \
+		--certificate-authority=ca.pem \
+		--embed-certs=true \
+		--server=https://${KUBERNETES_ADDRESS}:6443 \
+		--kubeconfig=${instance}.kubeconfig
+
+	  kubectl config set-credentials system:node:${instance} \
+		--client-certificate=${instance}.pem \
+		--client-key=${instance}-key.pem \
+		--embed-certs=true \
+		--kubeconfig=${instance}.kubeconfig
+
+	  kubectl config set-context default \
+		--cluster=kubernetes-the-hard-way \
+		--user=system:node:${instance} \
+		--kubeconfig=${instance}.kubeconfig
+
+	  kubectl config use-context default --kubeconfig=${instance}.kubeconfig
+	done
+
+	Generate a kube-proxy kubeconfig:
+
+	{
+	  kubectl config set-cluster kubernetes-the-hard-way \
+		--certificate-authority=ca.pem \
+		--embed-certs=true \
+		--server=https://${KUBERNETES_ADDRESS}:6443 \
+		--kubeconfig=kube-proxy.kubeconfig
+
+	  kubectl config set-credentials system:kube-proxy \
+		--client-certificate=kube-proxy.pem \
+		--client-key=kube-proxy-key.pem \
+		--embed-certs=true \
+		--kubeconfig=kube-proxy.kubeconfig
+
+	  kubectl config set-context default \
+		--cluster=kubernetes-the-hard-way \
+		--user=system:kube-proxy \
+		--kubeconfig=kube-proxy.kubeconfig
+
+	  kubectl config use-context default --kubeconfig=kube-proxy.kubeconfig
+	}
+	**getting kubelet files for controllers too here. 
+	Generate a kube-controller-manager kubeconfig:
+
+	{
+	  kubectl config set-cluster kubernetes-the-hard-way \
+		--certificate-authority=ca.pem \
+		--embed-certs=true \
+		--server=https://127.0.0.1:6443 \		**i was using api load balancer ip here; thats why i had to setup load balancer nginx backend before i could see the components working !!
+		--kubeconfig=kube-controller-manager.kubeconfig
+
+	  kubectl config set-credentials system:kube-controller-manager \
+		--client-certificate=kube-controller-manager.pem \
+		--client-key=kube-controller-manager-key.pem \
+		--embed-certs=true \
+		--kubeconfig=kube-controller-manager.kubeconfig
+
+	  kubectl config set-context default \
+		--cluster=kubernetes-the-hard-way \
+		--user=system:kube-controller-manager \
+		--kubeconfig=kube-controller-manager.kubeconfig
+
+	  kubectl config use-context default --kubeconfig=kube-controller-manager.kubeconfig
+	}
+
+	Generate a kube-scheduler kubeconfig:
+
+	{
+	  kubectl config set-cluster kubernetes-the-hard-way \
+		--certificate-authority=ca.pem \
+		--embed-certs=true \
+		--server=https://127.0.0.1:6443 \		**i was using api load balancer ip here; thats why i had to setup load balancer nginx backend before i could see the components working !!
+		--kubeconfig=kube-scheduler.kubeconfig
+
+	  kubectl config set-credentials system:kube-scheduler \
+		--client-certificate=kube-scheduler.pem \
+		--client-key=kube-scheduler-key.pem \
+		--embed-certs=true \
+		--kubeconfig=kube-scheduler.kubeconfig
+
+	  kubectl config set-context default \
+		--cluster=kubernetes-the-hard-way \
+		--user=system:kube-scheduler \
+		--kubeconfig=kube-scheduler.kubeconfig
+
+	  kubectl config use-context default --kubeconfig=kube-scheduler.kubeconfig
+	}
+
+	Generate an admin kubeconfig:
+
+	{
+	  kubectl config set-cluster kubernetes-the-hard-way \
+		--certificate-authority=ca.pem \
+		--embed-certs=true \
+		--server=https://127.0.0.1:6443 \		
+		--kubeconfig=admin.kubeconfig
+
+		**i was using api load balancer ip here; thats why i had to setup load balancer nginx backend before i could see the components working !!
+
+	  kubectl config set-credentials admin \
+		--client-certificate=admin.pem \
+		--client-key=admin-key.pem \
+		--embed-certs=true \
+		--kubeconfig=admin.kubeconfig
+
+	  kubectl config set-context default \
+		--cluster=kubernetes-the-hard-way \
+		--user=admin \
+		--kubeconfig=admin.kubeconfig
+
+
+	  kubectl config use-context default --kubeconfig=admin.kubeconfig
+	}
+
+	all kubeconfig files generated:
+	$ ls -ltr *kubeconfig*
+	-rw------- 1 cloud_user cloud_user 6572 Dec  5 16:32 chaitanyah3683c.mylabserver.com.kubeconfig *worker node 1
+	-rw------- 1 cloud_user cloud_user 6560 Dec  5 16:41 chaitanyah3685c.mylabserver.com.kubeconfig *worker node 2
+	-rw------- 1 cloud_user cloud_user 6372 Dec  5 16:52 kube-proxy.kubeconfig
+	-rw------- 1 cloud_user cloud_user 6446 Dec  5 16:55 kube-controller-manager.kubeconfig
+	-rw------- 1 cloud_user cloud_user 6400 Dec  5 16:57 kube-scheduler.kubeconfig
+	-rw------- 1 cloud_user cloud_user 6320 Dec  5 16:59 admin.kubeconfig
+	
+distributing kubeconfig files:
+	Now that we have generated the kubeconfig files that we will need in order to configure our Kubernetes cluster, we need to make sure that each cloud server has a copy of the kubeconfig files that it will need. 
+	In this lesson, we will distribute the kubeconfig files to each of the worker and controller nodes so that they will be in place for future lessons. After completing this lesson, each of your worker and controller nodes should have a copy of the kubeconfig files it needs.
+
+	Here are the commands used in the demo. Be sure to replace the placeholders with the actual values from your cloud servers.
+
+	Move kubeconfig files to the worker nodes:
+
+	scp <worker 1 hostname>.kubeconfig kube-proxy.kubeconfig user@<worker 1 public IP>:~/
+	scp <worker 2 hostname>.kubeconfig kube-proxy.kubeconfig user@<worker 2 public IP>:~/
+
+	Move kubeconfig files to the controller nodes:
+
+	scp admin.kubeconfig kube-controller-manager.kubeconfig kube-scheduler.kubeconfig user@<controller 1 public IP>:~/
+	scp admin.kubeconfig kube-controller-manager.kubeconfig kube-scheduler.kubeconfig user@<controller 2 public IP>:~/
+	
+	
+data encryption configuration in kubernetes:
+	One important security practice is to ensure that sensitive data is never stored in plain text. Kubernetes offers the ability to encrypt sensitive data when it is stored.
+	However, in order to use this feature it is necessary to provide Kubernetes with a data encrpytion config containing an encryption key. 
+	
+	can encrypt sensitive data at rest
+	secrets are dencrypted so that they are never stored on disc in plain text
+	we will generate an encryption key and put it into a configuration file. will tehn copy the file to the kubernetes controller servers.
+	
+	In order to make use of Kubernetes' ability to encrypt sensitive data at rest, you need to provide Kubernetes with an encrpytion key using a data encrpyiton config file. 
+	This lesson walks you through the process of creating a encryption key and storing it in the necessary file, 
+	as well as showing how to copy that file to your Kubernetes controllers. 
+	After completing this lesson, you should have a valid Kubernetes data encyption config file, and there should be a copy of that file on each of your Kubernetes controller servers.
+
+
+	Here are the commands used in the demo.
+
+	Generate the Kubernetes Data encrpytion config file containing the encrpytion key:
+
+	ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
+
+	cat > encryption-config.yaml << EOF
+	kind: EncryptionConfig
+	apiVersion: v1
+	resources:
+	  - resources:
+		  - secrets
+		providers:
+		  - aescbc:
+			  keys:
+				- name: key1
+				  secret: ${ENCRYPTION_KEY}
+		  - identity: {}
+	EOF
+
+	Copy the file to both controller servers:
+
+	scp encryption-config.yaml user@<controller 1 public ip>:~/
+	scp encryption-config.yaml user@<controller 2 public ip>:~/
+
+	$ ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
+	cloud_user@chaitanyah3686c:~/kube-har-way$ echo $ENCRYPTION_KEY
+	X5VxUUhQdJHBP0dhV862jxyvErVfCz/B1OxPZhkIV6U=
+	
+	this generates a random string, cut to 32 chars and then encodes it into base 64.
+	
+	
+etcd??
+	distributed key value store used to store data across a cluster of machines.
+	store data across a distributed cluster of machine and make sure the data is synchronized across all machines.
+	stores data about the state of the cluster and allows controllers to get synced data about the cluster.
+	no need on the worker node; only needed on the controller nodes.
+	
+creating etcd cluster:
+	Before you can stand up controllers for a Kubernetes cluster, you must first build an etcd cluster across your Kubernetes control nodes. This lesson provides a demonstration of how to set up an etcd cluster in preparation for bootstrapping Kubernetes. 
+	After completing this lesson, you should have a working etcd cluster that consists of your Kubernetes control nodes.
+
+
+	Here are the commands used in the demo (note that these have to be run on both controller servers, with a few differences between them):
+
+	wget -q --show-progress --https-only --timestamping \
+	  "https://github.com/coreos/etcd/releases/download/v3.3.5/etcd-v3.3.5-linux-amd64.tar.gz"
+	  
+	  for kubernetes v1.17.0:
+	  wget -q --show-progress --https-only --timestamping \
+	  "https://github.com/coreos/etcd/releases/download/v3.3.5/etcd-v3.3.5-linux-amd64.tar.gz"
+	  
+	tar -xvf etcd-v3.3.5-linux-amd64.tar.gz
+	sudo mv etcd-v3.3.5-linux-amd64/etcd* /usr/local/bin/
+	sudo mkdir -p /etc/etcd /var/lib/etcd
+	sudo cp ca.pem kubernetes-key.pem kubernetes.pem /etc/etcd/
+
+	Set up the following environment variables. Be sure you replace all of the <placeholder values> with their corresponding real values:
+
+	ETCD_NAME=<cloud server hostname>
+	INTERNAL_IP=$(curl http://169.254.169.254/latest/meta-data/local-ipv4) **this curl is simply a call to the aws api that returns the instance's private ip.
+	INITIAL_CLUSTER=<controller 1 hostname>=https://<controller 1 private ip>:2380,<controller 2 hostname>=https://<controller 2 private ip>:2380
+
+	Create the systemd unit file for etcd using this command. Note that this command uses the environment variables that were set earlier:
+
+	cat << EOF | sudo tee /etc/systemd/system/etcd.service
+	[Unit]
+	Description=etcd
+	Documentation=https://github.com/coreos
+
+	[Service]
+	ExecStart=/usr/local/bin/etcd \\
+	  --name ${ETCD_NAME} \\
+	  --cert-file=/etc/etcd/kubernetes.pem \\
+	  --key-file=/etc/etcd/kubernetes-key.pem \\
+	  --peer-cert-file=/etc/etcd/kubernetes.pem \\
+	  --peer-key-file=/etc/etcd/kubernetes-key.pem \\
+	  --trusted-ca-file=/etc/etcd/ca.pem \\
+	  --peer-trusted-ca-file=/etc/etcd/ca.pem \\
+	  --peer-client-cert-auth \\
+	  --client-cert-auth \\
+	  --initial-advertise-peer-urls https://${INTERNAL_IP}:2380 \\
+	  --listen-peer-urls https://${INTERNAL_IP}:2380 \\
+	  --listen-client-urls https://${INTERNAL_IP}:2379,https://127.0.0.1:2379 \\
+	  --advertise-client-urls https://${INTERNAL_IP}:2379 \\
+	  --initial-cluster-token etcd-cluster-0 \\
+	  --initial-cluster ${INITIAL_CLUSTER} \\
+	  --initial-cluster-state new \\
+	  --data-dir=/var/lib/etcd
+	Restart=on-failure
+	RestartSec=5
+
+	[Install]
+	WantedBy=multi-user.target
+	EOF
+
+	Start and enable the etcd service:
+
+	sudo systemctl daemon-reload
+	sudo systemctl enable etcd
+	sudo systemctl start etcd
+
+	You can verify that the etcd service started up successfully like so:
+
+	sudo systemctl status etcd
+
+	Use this command to verify that etcd is working correctly. The output should list your two etcd nodes:
+
+	sudo ETCDCTL_API=3 etcdctl member list \
+	  --endpoints=https://127.0.0.1:2379 \
+	  --cacert=/etc/etcd/ca.pem \
+	  --cert=/etc/etcd/kubernetes.pem \
+	  --key=/etc/etcd/kubernetes-key.pem
+
+		**LIKE SO IN THE OTHER CLUSTER TOO..	
+	$ echo $INITIAL_CLUSTER '||' $INTERNAL_IP '||' $ETCD_NAME
+	chaitanyah3681c.mylabserver.com=https://172.31.46.223:2380,chaitanyah3682c.mylabserver.com=https://172.31.42.134:2380 || 172.31.42.134 || chaitanyah3682c.mylabserver.com
+	cloud_user@chaitanyah3682c:~$ 
+
+	* u want to run systemctl daemon-reload whenever a systemd file changes.
+	
+	$ sudo ETCDCTL_API=3 etcdctl member list --endpoints=https://127.0.0.1:2379 --cacert=/etc/etcd/ca.pem --cert=/etc/etcd/kubernetes.pem --key=/etc/etcd/kubernetes-key.pem
+	3a9f545605563f4, started, chaitanyah3681c.mylabserver.com, https://172.31.46.223:2380, https://172.31.46.223:2379
+	80c3fb66249e63b, started, chaitanyah3682c.mylabserver.com, https://172.31.42.134:2380, https://172.31.42.134:2379
+	cloud_user@chaitanyah3681c:~$ 
+	
+kubernetes control plane ??
+	is a set of services that control the kubernetes cluster.
+	control plane makes global decisions about the cluster and detect and respond to cluster events
+	control plane components:
+		kube-apiserver
+			serves kubernetes api. allows for any interaction with the cluster
+			api is the interface to the cluster plane and inturn to the cluster
+		etcd
+			cluster datastore
+		kube-controller-manager
+			1 service that has a series of controllers that provide a wide range of functionality
+		kube-scheduler
+			schedules pods on available worker nodes
+			finding a node to run a pod on.
+		cloud-controller-manager
+			handles interaction with underlying cloud providers
+			provides integration points with underlying cloud services
+		
+control plane overview:
+	controller1				controller2
+	etcd					etcd
+	kube-apiserver			kube-apiserver
+	kube-controller-manager	kube-controller-manager
+	kube-scheduler			kube-scheduler
+			kube api load balancer (lb'in to kube-apiserver endpoints in controller 1 and 2)
+			
+installing kubernetes control plane binaries:
+	The first step in bootstrapping a new Kubernetes control plane is to install the necessary binaries on the controller servers. We will walk through the process of downloading and installing the binaries on both Kubernetes controllers. 
+	This will prepare your environment for the lessons that follow, in which we will configure these binaries to run as systemd services.
+
+	You can install the control plane binaries on each control node like this:
+
+	sudo mkdir -p /etc/kubernetes/config
+
+	wget -q --show-progress --https-only --timestamping \
+	  "https://storage.googleapis.com/kubernetes-release/release/v1.10.2/bin/linux/amd64/kube-apiserver" \
+	  "https://storage.googleapis.com/kubernetes-release/release/v1.10.2/bin/linux/amd64/kube-controller-manager" \
+	  "https://storage.googleapis.com/kubernetes-release/release/v1.10.2/bin/linux/amd64/kube-scheduler" \
+	  "https://storage.googleapis.com/kubernetes-release/release/v1.10.2/bin/linux/amd64/kubectl"
+	  
+	  for v1.17.0:
+	  wget -q --show-progress --https-only --timestamping \
+	  "https://storage.googleapis.com/kubernetes-release/release/v1.17.0/bin/linux/amd64/kube-apiserver" \
+	  "https://storage.googleapis.com/kubernetes-release/release/v1.17.0/bin/linux/amd64/kube-controller-manager" \
+	  "https://storage.googleapis.com/kubernetes-release/release/v1.17.0/bin/linux/amd64/kube-scheduler" \
+	  "https://storage.googleapis.com/kubernetes-release/release/v1.17.0/bin/linux/amd64/kubectl"
+
+	chmod +x kube-apiserver kube-controller-manager kube-scheduler kubectl
+
+	sudo mv kube-apiserver kube-controller-manager kube-scheduler kubectl /usr/local/bin/
+
+	
+setting up kubernetes api server:
+	The Kubernetes API server provides the primary interface for the Kubernetes control plane and the cluster as a whole. When you interact with Kubernetes, you are nearly always doing it through the Kubernetes API server.
+	This lesson will guide you through the process of configuring the kube-apiserver service on your two Kubernetes control nodes. After completing this lesson, you should have a systemd unit set up to run kube-apiserver as a service on each Kubernetes control node.
+
+	You can configure the Kubernetes API server like so:
+
+	sudo mkdir -p /var/lib/kubernetes/
+
+	sudo cp ca.pem ca-key.pem kubernetes-key.pem kubernetes.pem \
+	  service-account-key.pem service-account.pem \
+	  encryption-config.yaml /var/lib/kubernetes/
+
+	Set some environment variables that will be used to create the systemd unit file. Make sure you replace the placeholders with their actual values:
+
+	INTERNAL_IP=$(curl http://169.254.169.254/latest/meta-data/local-ipv4)
+	CONTROLLER0_IP=<private ip of controller 0>
+	CONTROLLER1_IP=<private ip of controller 1>
+
+	Generate the kube-apiserver unit file for systemd:
+
+	cat << EOF | sudo tee /etc/systemd/system/kube-apiserver.service
+	[Unit]
+	Description=Kubernetes API Server
+	Documentation=https://github.com/kubernetes/kubernetes
+
+	[Service]
+	ExecStart=/usr/local/bin/kube-apiserver \\
+	  --advertise-address=${INTERNAL_IP} \\
+	  --allow-privileged=true \\
+	  --apiserver-count=3 \\
+	  --audit-log-maxage=30 \\
+	  --audit-log-maxbackup=3 \\
+	  --audit-log-maxsize=100 \\
+	  --audit-log-path=/var/log/audit.log \\
+	  --authorization-mode=Node,RBAC \\
+	  --bind-address=0.0.0.0 \\
+	  --client-ca-file=/var/lib/kubernetes/ca.pem \\
+	  --enable-admission-plugins=Initializers,NamespaceLifecycle,NodeRestriction,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota \\
+	  --enable-swagger-ui=true \\
+	  --etcd-cafile=/var/lib/kubernetes/ca.pem \\
+	  --etcd-certfile=/var/lib/kubernetes/kubernetes.pem \\
+	  --etcd-keyfile=/var/lib/kubernetes/kubernetes-key.pem \\
+	  --etcd-servers=https://$CONTROLLER0_IP:2379,https://$CONTROLLER1_IP:2379 \\
+	  --event-ttl=1h \\
+	  --experimental-encryption-provider-config=/var/lib/kubernetes/encryption-config.yaml \\
+	  --kubelet-certificate-authority=/var/lib/kubernetes/ca.pem \\
+	  --kubelet-client-certificate=/var/lib/kubernetes/kubernetes.pem \\
+	  --kubelet-client-key=/var/lib/kubernetes/kubernetes-key.pem \\
+	  --kubelet-https=true \\
+	  --runtime-config=api/all \\
+	  --service-account-key-file=/var/lib/kubernetes/service-account.pem \\
+	  --service-cluster-ip-range=10.32.0.0/24 \\
+	  --service-node-port-range=30000-32767 \\
+	  --tls-cert-file=/var/lib/kubernetes/kubernetes.pem \\
+	  --tls-private-key-file=/var/lib/kubernetes/kubernetes-key.pem \\
+	  --v=2 \\
+	  --kubelet-preferred-address-types=InternalIP,InternalDNS,Hostname,ExternalIP,ExternalDNS
+	Restart=on-failure
+	RestartSec=5
+
+	[Install]
+	WantedBy=multi-user.target
+	EOF
+
+	**here, when setting up for 1.16.0, i noticed that initializers admission controller was failing as it is not supported.
+	more details in here:
+	https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/
+	think there should not be spaces in the comma separated value for enable-admission-plugins.
+	removed spaces in between admission controllers and did a daemon-reload and apiserver was functioning.
+	used journalctl -xe to debug the issue.
+
+	--kubelet-preferred-address-types=InternalIP,InternalDNS,Hostname,ExternalIP,ExternalDNS **this is the only one thats added in lac hard way course. added to ensure kubelet works in all cases.
+
+setting up kubernetes controller manager:
+	Now that we have set up kube-apiserver, we are ready to configure kube-controller-manager. 
+	This lesson walks you through the process of configuring a systemd service for the Kubernetes Controller Manager. 
+	After completing this lesson, you should have the kubeconfig and systemd unit file set up and ready to run the kube-controller-manager service on both of your control nodes.
+
+	You can configure the Kubernetes Controller Manager like so:
+
+	sudo cp kube-controller-manager.kubeconfig /var/lib/kubernetes/
+
+	Generate the kube-controller-manager systemd unit file:
+
+	cat << EOF | sudo tee /etc/systemd/system/kube-controller-manager.service
+	[Unit]
+	Description=Kubernetes Controller Manager
+	Documentation=https://github.com/kubernetes/kubernetes
+
+	[Service]
+	ExecStart=/usr/local/bin/kube-controller-manager \\
+	  --address=0.0.0.0 \\
+	  --cluster-cidr=10.200.0.0/16 \\
+	  --cluster-name=kubernetes \\
+	  --cluster-signing-cert-file=/var/lib/kubernetes/ca.pem \\
+	  --cluster-signing-key-file=/var/lib/kubernetes/ca-key.pem \\
+	  --kubeconfig=/var/lib/kubernetes/kube-controller-manager.kubeconfig \\
+	  --leader-elect=true \\
+	  --root-ca-file=/var/lib/kubernetes/ca.pem \\
+	  --service-account-private-key-file=/var/lib/kubernetes/service-account-key.pem \\
+	  --service-cluster-ip-range=10.32.0.0/24 \\
+	  --use-service-account-credentials=true \\
+	  --v=2
+	Restart=on-failure
+	RestartSec=5
+
+	[Install]
+	WantedBy=multi-user.target
+	EOF
+
+
+setting up kubernetes scheduler:
+	Now we are ready to set up the Kubernetes scheduler. This lesson will walk you through the process of configuring the kube-scheduler 
+	systemd service. Since this is the last of the three control plane services that need to be set up in this section, 
+	this lesson also guides you through through enabling and starting all three services on both control nodes.
+	Finally, this lesson shows you how to verify that your Kubernetes controllers are healthy and working so far. After completing this lesson,
+	you will have a basic, working, Kuberneets control plane distributed across your two control nodes.
+
+	You can configure the Kubernetes Sheduler like this.
+
+	Copy kube-scheduler.kubeconfig into the proper location:
+
+	sudo cp kube-scheduler.kubeconfig /var/lib/kubernetes/
+
+	Generate the kube-scheduler yaml config file.
+
+	cat << EOF | sudo tee /etc/kubernetes/config/kube-scheduler.yaml
+	apiVersion: componentconfig/v1alpha1 ** for later versions (since 1.13) this api has been deprecated. use kubescheduler.config.k8s.io/v1alpha1 instead.
+	kind: KubeSchedulerConfiguration
+	clientConnection:
+	  kubeconfig: "/var/lib/kubernetes/kube-scheduler.kubeconfig"
+	leaderElection:
+	  leaderElect: true
+	EOF
+
+	Create the kube-scheduler systemd unit file:
+
+	cat << EOF | sudo tee /etc/systemd/system/kube-scheduler.service
+	[Unit]
+	Description=Kubernetes Scheduler
+	Documentation=https://github.com/kubernetes/kubernetes
+
+	[Service]
+	ExecStart=/usr/local/bin/kube-scheduler \\
+	  --config=/etc/kubernetes/config/kube-scheduler.yaml \\
+	  --v=2
+	Restart=on-failure
+	RestartSec=5
+
+	[Install]
+	WantedBy=multi-user.target
+	EOF
+	
+	
+	**with 1.16.3; had to modify the kube-scheduler systemd file like so:
+	cat << EOF | sudo tee /etc/systemd/system/kube-scheduler.service
+	[Unit]
+	Description=kube scheduler
+	Documentation=https://github.com/kuberentes/kubernetes
+
+	[Service]
+	ExecStart=/usr/local/bin/kube-scheduler \
+	  --authentication-kubeconfig=/var/lib/kubernetes/kube-scheduler.kubeconfig \
+	  --authorization-kubeconfig=/var/lib/kubernetes/kube-scheduler.kubeconfig \
+	  --kubeconfig=/var/lib/kubernetes/kube-scheduler.kubeconfig \
+	  --leader-elect=true \
+	  --v=2
+	Restart=on-failure
+	RestartSec=5
+
+	[Install]
+	WantedBy=multi-user.target
+	EOF
+	~
+	remvoed the --config of the kube-scheduler.yaml file completely and added the items in that yml file
+	in the config for systemd itself; and added authorization adn authentication kubeconfig lines.
+
+	lookup these three:
+	https://github.com/kubernetes/kubeadm/issues/1285
+	https://github.com/kubernetes/kubernetes/issues/71752
+	https://github.com/kubernetes/kubernetes/issues/66874
+
+
+	Start and enable all of the services:
+
+	sudo systemctl daemon-reload
+	sudo systemctl enable kube-apiserver kube-controller-manager kube-scheduler
+	sudo systemctl start kube-apiserver kube-controller-manager kube-scheduler
+
+	It's a good idea to verify that everything is working correctly so far: Make sure all the services are active (running):
+
+	sudo systemctl status kube-apiserver kube-controller-manager kube-scheduler
+
+	** u have to setup load balancer and then u can see thsi working as admin.kubeconfig has ip of load balancer as server endpoint.
+	Use kubectl to check componentstatuses:
+
+	kubectl get componentstatuses --kubeconfig admin.kubeconfig
+
+	You should get output that looks like this:
+
+	NAME                 STATUS    MESSAGE              ERROR
+	controller-manager   Healthy   ok
+	scheduler            Healthy   ok
+	etcd-0               Healthy   {"health": "true"}
+	etcd-1               Healthy   {"health": "true"}
+	
+	cloud_user@chaitanyah3682c:~$ kubectl get componentstatus
+	NAME                 STATUS    MESSAGE             ERROR
+	controller-manager   Healthy   ok                  
+	scheduler            Healthy   ok                  
+	etcd-0               Healthy   {"health":"true"}   
+	etcd-1               Healthy   {"health":"true"}   
+	cloud_user@chaitanyah3682c:~$ 
+	
+	**missed a few \ at the end in the execstart command; needs to only be one if ur are vi'ing the file instead of cat dumping.
+	also, note that contreoller-manager and scheduler and others are connected within the kubeconfig usign the ip of the load balancer; so that need
+	to be setup before u can start to troubleshoot issues.
+	
+setting up nginxz load balancer:
+	In order to achieve redundancy for your Kubernetes cluster, you will need to load balance usage of the Kubernetes API across multiple control nodes. 
+	In this lesson, you will learn how to create a simple nginx server to perform this balancing. After completing this lesson, you will be able to interact with both control nodes of your kubernetes cluster using the nginx load balancer.
+
+	Here are the commands you can use to set up the nginx load balancer. Run these on the server that you have designated as your load balancer server:
+
+	sudo apt-get install -y nginx
+	sudo systemctl enable nginx
+	sudo mkdir -p /etc/nginx/tcpconf.d
+	sudo vi /etc/nginx/nginx.conf
+
+	Add the following to the end of nginx.conf:
+	**at the total end of it; not in the http section; 
+	include /etc/nginx/tcpconf.d/*;
+
+	Set up some environment variables for the lead balancer config file:
+
+	CONTROLLER0_IP=<controller 0 private ip>
+	CONTROLLER1_IP=<controller 1 private ip>
+
+	Create the load balancer nginx config file:
+
+	cat << EOF | sudo tee /etc/nginx/tcpconf.d/kubernetes.conf
+	stream {
+		upstream kubernetes {
+			server $CONTROLLER0_IP:6443;
+			server $CONTROLLER1_IP:6443;
+		}
+
+		server {
+			listen 6443;
+			listen 443;
+			proxy_pass kubernetes;
+		}
+	}
+	EOF
+
+	Reload the nginx configuration:
+
+	sudo nginx -s reload
+
+	You can verify that the load balancer is working like so:
+
+	curl -k https://localhost:6443/version
+
+
+enable http health checks:
+	load balancer needs to perform health checks against the kubernetes api to measure
+	the health status of api nodes.
+	in the guide in github, kelsey hightower uses gcp load balancer for load balancing and it cant easily perform health checks over https, only http.
+	so a proxy server is setup to allow these health checks to be performed over http instead.
+	since we use nginx as our load balancer, we dont need this; but followed to simulate teh guide on github.
+	nginx is capable of determining the health of the individual endpoints within it, without us needing to set this up manually.
+	
+	
+
+	cat > kubernetes.default.svc.cluster.local << EOF
+	server {
+	  listen      80;
+	  server_name kubernetes.default.svc.cluster.local;
+
+	  location /healthz {
+		 proxy_pass                    https://127.0.0.1:6443/healthz;
+		 proxy_ssl_trusted_certificate /var/lib/kubernetes/ca.pem;
+	  }
+	}
+	EOF
+
+	Set up the proxy configuration so that it is loaded by nginx:
+
+	sudo mv kubernetes.default.svc.cluster.local /etc/nginx/sites-available/kubernetes.default.svc.cluster.local
+	sudo ln -s /etc/nginx/sites-available/kubernetes.default.svc.cluster.local /etc/nginx/sites-enabled/
+	sudo systemctl restart nginx
+	sudo systemctl enable nginx
+
+	You can verify that everything is working like so:
+
+	curl -H "Host: kubernetes.default.svc.cluster.local" -i http://127.0.0.1/healthz
+
+	You should receive a 200 OK response.
+
+
+	for v 1.16; kubectlg et componentstaus returns unknown; but adding -o yaml or -o json runs fine.
+
+	$ kubectl get componentstatus --kubeconfig admin.kubeconfig
+	NAME                 AGE
+	etcd-0               <unknown>
+	etcd-1               <unknown>
+	scheduler            <unknown>
+	controller-manager   <unknown>
+	cloud_user@chaitanyah3686c:~/kube-hard-way$ kubectl get componentstatus -o yaml --kubeconfig admin.kubeconfig
+	apiVersion: v1
+	items:
+	- apiVersion: v1
+	  conditions:
+	  - message: ok
+		status: "True"
+		type: Healthy
+	  kind: ComponentStatus
+	  metadata:
+		creationTimestamp: null
+		name: controller-manager
+		selfLink: /api/v1/componentstatuses/controller-manager
+	- apiVersion: v1
+	  conditions:
+	  - message: ok
+		status: "True"
+		type: Healthy
+	  kind: ComponentStatus
+	  metadata:
+		creationTimestamp: null
+		name: scheduler
+		selfLink: /api/v1/componentstatuses/scheduler
+	- apiVersion: v1
+	  conditions:
+	  - message: '{"health":"true"}'
+		status: "True"
+		type: Healthy
+	  kind: ComponentStatus
+	  metadata:
+		creationTimestamp: null
+		name: etcd-0
+		selfLink: /api/v1/componentstatuses/etcd-0
+	- apiVersion: v1
+	  conditions:
+	  - message: '{"health":"true"}'
+		status: "True"
+		type: Healthy
+	  kind: ComponentStatus
+	  metadata:
+		creationTimestamp: null
+		name: etcd-1
+		selfLink: /api/v1/componentstatuses/etcd-1
+	kind: List
+	metadata:
+	  resourceVersion: ""
+	  selfLink: ""
+	cloud_user@chaitanyah3686c:~/kube-hard-way$ kubectl get componentstatus -o json --kubeconfig admin.kubeconfig
+	{
+		"apiVersion": "v1",
+		"items": [
+			{
+				"apiVersion": "v1",
+				"conditions": [
+					{
+						"message": "ok",
+						"status": "True",
+						"type": "Healthy"
+					}
+				],
+				"kind": "ComponentStatus",
+				"metadata": {
+					"creationTimestamp": null,
+					"name": "controller-manager",
+					"selfLink": "/api/v1/componentstatuses/controller-manager"
+				}
+			},
+			{
+				"apiVersion": "v1",
+				"conditions": [
+					{
+						"message": "ok",
+						"status": "True",
+						"type": "Healthy"
+					}
+				],
+				"kind": "ComponentStatus",
+				"metadata": {
+					"creationTimestamp": null,
+					"name": "scheduler",
+					"selfLink": "/api/v1/componentstatuses/scheduler"
+				}
+			},
+			{
+				"apiVersion": "v1",
+				"conditions": [
+					{
+						"message": "{\"health\":\"true\"}",
+						"status": "True",
+						"type": "Healthy"
+					}
+				],
+				"kind": "ComponentStatus",
+				"metadata": {
+					"creationTimestamp": null,
+					"name": "etcd-1",
+					"selfLink": "/api/v1/componentstatuses/etcd-1"
+				}
+			},
+			{
+				"apiVersion": "v1",
+				"conditions": [
+					{
+						"message": "{\"health\":\"true\"}",
+						"status": "True",
+						"type": "Healthy"
+					}
+				],
+				"kind": "ComponentStatus",
+				"metadata": {
+					"creationTimestamp": null,
+					"name": "etcd-0",
+					"selfLink": "/api/v1/componentstatuses/etcd-0"
+				}
+			}
+		],
+		"kind": "List",
+		"metadata": {
+			"resourceVersion": "",
+			"selfLink": ""
+		}
+	}
+
+
+
+setting up rbac for kubelet authorization:
+	role based access control
+	make sure kubernetes api has permission to access the kubelet api on each node
+	and perform certain common tasks.
+	will create a cluster role with the necessary permissions and assign that role to the kubernetes user with a clusterrolebinding.
+	
+	One of the necessary steps in setting up a new Kubernetes cluster from scratch is to assign permissions that allow the Kubernetes API to access various functionality within the worker kubelets. 
+	This lesson guides you through the process of creating a ClusterRole and binding it to the kubernetes user so that those permissions will be in place. After completing this lesson, your cluster will have the necessary role-based access control configuration to allow the cluster's API to access kubelet functionality such as logs and metrics.
+
+	You can configure RBAC for kubelet authorization with these commands. Note that these commands only need to be run on one control node.
+
+	Create a role with the necessary permissions:
+
+	cat << EOF | kubectl apply --kubeconfig admin.kubeconfig -f -
+	apiVersion: rbac.authorization.k8s.io/v1beta1
+	kind: ClusterRole
+	metadata:
+	  annotations:
+		rbac.authorization.kubernetes.io/autoupdate: "true"
+	  labels:
+		kubernetes.io/bootstrapping: rbac-defaults
+	  name: system:kube-apiserver-to-kubelet
+	rules:
+	  - apiGroups:
+		  - ""
+		resources:
+		  - nodes/proxy
+		  - nodes/stats
+		  - nodes/log
+		  - nodes/spec
+		  - nodes/metrics
+		verbs:
+		  - "*"
+	EOF
+
+	Bind the role to the kubernetes user:
+
+	cat << EOF | kubectl apply --kubeconfig admin.kubeconfig -f -
+	apiVersion: rbac.authorization.k8s.io/v1beta1
+	kind: ClusterRoleBinding
+	metadata:
+	  name: system:kube-apiserver
+	  namespace: ""
+	roleRef:
+	  apiGroup: rbac.authorization.k8s.io
+	  kind: ClusterRole
+	  name: system:kube-apiserver-to-kubelet
+	subjects:
+	  - apiGroup: rbac.authorization.k8s.io
+		kind: User
+		name: kubernetes
+	EOF
+
+	**u have to give https://in server as this makes sure a https request is sent to the api server.
+	if u dont, then http request is sent to the server instead. kubernetes doesnt serve on http so it will
+	fail saying 
+		"Unable to connect to the server: net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x15\x03\x01\x00\x02\x02" kubernetes"
+	
+	
+kubernetes worker nodes:
+	kubelet
+		controls each worker node, providing the apis that are used by the control plane to manage nodes and pods
+		also interacts with the container runtime to manage containers
+	kube-proxy
+		provides ip tables rules on the node to provide nw access to pods
+	container runtime
+		downloads images and run containers
+		not part of kubernetes
+			docker, rocketd, containerd
+
+kubernetes worker node arch overview and binaries download
+	We are now ready to begin the process of setting up our worker nodes. The first step is to download and install the binary file which we will later use to configure our worker nodes services.
+	In this lesson, we will be downloading and installing the binaries for containerd, kubectl, kubelet, and kube-proxy, as well as other software that they depend on. 
+	After completing this lesson, you should have these binaries downloaded and all of the files moved into the correct locations in preparation for configuring the worker node services.
+
+	You can install the worker binaries like so. Run these commands on both worker nodes:
+
+	sudo apt-get -y install socat conntrack ipset
+
+	wget -q --show-progress --https-only --timestamping \
+	  https://github.com/kubernetes-incubator/cri-tools/releases/download/v1.0.0-beta.0/crictl-v1.0.0-beta.0-linux-amd64.tar.gz \
+	  https://storage.googleapis.com/kubernetes-the-hard-way/runsc \
+	  https://github.com/opencontainers/runc/releases/download/v1.0.0-rc5/runc.amd64 \
+	  https://github.com/containernetworking/plugins/releases/download/v0.6.0/cni-plugins-amd64-v0.6.0.tgz \
+	  https://github.com/containerd/containerd/releases/download/v1.1.0/containerd-1.1.0.linux-amd64.tar.gz \
+	  https://storage.googleapis.com/kubernetes-release/release/v1.10.2/bin/linux/amd64/kubectl \
+	  https://storage.googleapis.com/kubernetes-release/release/v1.10.2/bin/linux/amd64/kube-proxy \
+	  https://storage.googleapis.com/kubernetes-release/release/v1.10.2/bin/linux/amd64/kubelet
+	  
+	  for v1.16.0:
+	  
+	  wget -q --show-progress --https-only --timestamping \
+	  https://github.com/kubernetes-incubator/cri-tools/releases/download/v1.0.0-beta.0/crictl-v1.0.0-beta.0-linux-amd64.tar.gz \
+	  https://storage.googleapis.com/kubernetes-the-hard-way/runsc \
+	  https://github.com/opencontainers/runc/releases/download/v1.0.0-rc5/runc.amd64 \
+	  https://github.com/containernetworking/plugins/releases/download/v0.6.0/cni-plugins-amd64-v0.6.0.tgz \
+	  https://github.com/containerd/containerd/releases/download/v1.1.0/containerd-1.1.0.linux-amd64.tar.gz \
+	  https://storage.googleapis.com/kubernetes-release/release/v1.16.0/bin/linux/amd64/kubectl \
+	  https://storage.googleapis.com/kubernetes-release/release/v1.16.0/bin/linux/amd64/kube-proxy \
+	  https://storage.googleapis.com/kubernetes-release/release/v1.16.0/bin/linux/amd64/kubelet
+
+	sudo mkdir -p \
+	  /etc/cni/net.d \
+	  /opt/cni/bin \
+	  /var/lib/kubelet \
+	  /var/lib/kube-proxy \
+	  /var/lib/kubernetes \
+	  /var/run/kubernetes
+
+	chmod +x kubectl kube-proxy kubelet runc.amd64 runsc
+
+	sudo mv runc.amd64 runc
+
+	sudo mv kubectl kube-proxy kubelet runc runsc /usr/local/bin/
+
+	sudo tar -xvf crictl-v1.0.0-beta.0-linux-amd64.tar.gz -C /usr/local/bin/
+
+	sudo tar -xvf cni-plugins-amd64-v0.6.0.tgz -C /opt/cni/bin/
+
+	sudo tar -xvf containerd-1.1.0.linux-amd64.tar.gz -C /
+
+configuring containerd:
+	Containerd is the container runtime used to run containers managed by Kubernetes in this course. In this lesson, we will configure a systemd service for containerd on both of our worker node servers. This containerd service will be used to run containerd as a component of each worker node. After completing this lesson, you should have a containerd configured to run as a systemd service on both workers.
+
+	You can configure the containerd service like so. Run these commands on both worker nodes:
+
+	sudo mkdir -p /etc/containerd/
+
+	Create the containerd config.toml:
+
+	cat << EOF | sudo tee /etc/containerd/config.toml
+	[plugins]
+	  [plugins.cri.containerd]
+		snapshotter = "overlayfs"
+		[plugins.cri.containerd.default_runtime]
+		  runtime_type = "io.containerd.runtime.v1.linux"
+		  runtime_engine = "/usr/local/bin/runc"
+		  runtime_root = ""
+		[plugins.cri.containerd.untrusted_workload_runtime]
+		  runtime_type = "io.containerd.runtime.v1.linux"
+		  runtime_engine = "/usr/local/bin/runsc"
+		  runtime_root = "/run/containerd/runsc"
+	EOF
+
+	Create the containerd unit file:
+
+	cat << EOF | sudo tee /etc/systemd/system/containerd.service
+	[Unit]
+	Description=containerd container runtime
+	Documentation=https://containerd.io
+	After=network.target
+
+	[Service]
+	ExecStartPre=/sbin/modprobe overlay
+	ExecStart=/bin/containerd
+	Restart=always
+	RestartSec=5
+	Delegate=yes
+	KillMode=process
+	OOMScoreAdjust=-999
+	LimitNOFILE=1048576
+	LimitNPROC=infinity
+	LimitCORE=infinity
+
+	[Install]
+	WantedBy=multi-user.target
+	EOF
+
+configuring kubelet:
+	Kubelet is the Kubernetes agent which runs on each worker node. Acting as a middleman between the Kubernetes control plane and the underlying container runtime, it coordinates the running of containers on the worker node. 
+	In this lesson, we will configure our systemd service for kubelet. After completing this lesson, you should have a systemd service configured and ready to run on each worker node.
+
+	You can configure the kubelet service like so. Run these commands on both worker nodes.
+
+	Set a HOSTNAME environment variable that will be used to generate your config files. Make sure you set the HOSTNAME appropriately for each worker node:
+
+	HOSTNAME=$(hostname)
+	sudo mv ${HOSTNAME}-key.pem ${HOSTNAME}.pem /var/lib/kubelet/
+	sudo mv ${HOSTNAME}.kubeconfig /var/lib/kubelet/kubeconfig
+	sudo mv ca.pem /var/lib/kubernetes/
+
+	Create the kubelet config file:
+
+	cat << EOF | sudo tee /var/lib/kubelet/kubelet-config.yaml
+	kind: KubeletConfiguration
+	apiVersion: kubelet.config.k8s.io/v1beta1
+	authentication:
+	  anonymous:
+		enabled: false
+	  webhook:
+		enabled: true
+	  x509:
+		clientCAFile: "/var/lib/kubernetes/ca.pem"
+	authorization:
+	  mode: Webhook
+	clusterDomain: "cluster.local"
+	clusterDNS: 
+	  - "10.32.0.10"
+	runtimeRequestTimeout: "15m"
+	tlsCertFile: "/var/lib/kubelet/${HOSTNAME}.pem"
+	tlsPrivateKeyFile: "/var/lib/kubelet/${HOSTNAME}-key.pem"
+	EOF
+
+	Create the kubelet unit file:
+
+	cat << EOF | sudo tee /etc/systemd/system/kubelet.service
+	[Unit]
+	Description=Kubernetes Kubelet
+	Documentation=https://github.com/kubernetes/kubernetes
+	After=containerd.service
+	Requires=containerd.service
+
+	[Service]
+	ExecStart=/usr/local/bin/kubelet \\
+	  --config=/var/lib/kubelet/kubelet-config.yaml \\
+	  --container-runtime=remote \\
+	  --container-runtime-endpoint=unix:///var/run/containerd/containerd.sock \\
+	  --image-pull-progress-deadline=2m \\
+	  --kubeconfig=/var/lib/kubelet/kubeconfig \\
+	  --network-plugin=cni \\
+	  --register-node=true \\
+	  --v=2 \\
+	  --hostname-override=${HOSTNAME} \\
+	  --allow-privileged=true
+	Restart=on-failure
+	RestartSec=5
+
+	[Install]
+	WantedBy=multi-user.target
+	EOF
+
+	**here, --allow-privileged mode true is needed for other networking related pluginx to work.
+	**hostname-override is palced just to make sure the config file for kubelet service in systemd has the hostname overridden
+	to the actual hostname of the server. in lac servers, it was noticed that not putting this option in systemd file for kubelet
+	caused the servers to be reported on the master not has fqdn but as host ips, causing issues with identification of worker nodes
+	and eventual issues with entworking and scheduling.
+	
+	**when working with v1.16.0, had to remove --allow-privileged option as it was unknown to kubelet; figured out from syslog.
+	also, kube-proxy before was erroring saying the node cant be found, which basically means kubelet with that node configuration cant be found.
+	so u hae to have kubelet setup before kube-proxy can work successfully.
+	
+	
+configuring kube-proxy and validating if the worker nodes show up on the control nodes:
+	Kube-proxy is an important component of each Kubernetes worker node. It is responsible for providing network routing to support Kubernetes networking components. 
+	In this lesson, we will configure our kube-proxy systemd service. Since this is the last of the three worker node services that we need to configure, we will also go ahead and start all of our worker node services once we're done. Finally, we will complete some steps to verify that our cluster is set up properly and functioning as expected so far.
+	After completing this lesson, you should have two Kubernetes worker nodes up and running, and they should be able to successfully register themselves with the cluster.
+
+	You can configure the kube-proxy service like so. Run these commands on both worker nodes:
+
+	sudo mv kube-proxy.kubeconfig /var/lib/kube-proxy/kubeconfig
+
+	Create the kube-proxy config file:
+
+	cat << EOF | sudo tee /var/lib/kube-proxy/kube-proxy-config.yaml
+	kind: KubeProxyConfiguration
+	apiVersion: kubeproxy.config.k8s.io/v1alpha1
+	clientConnection:
+	  kubeconfig: "/var/lib/kube-proxy/kubeconfig"
+	mode: "iptables"
+	clusterCIDR: "10.200.0.0/16"
+	EOF
+
+	Create the kube-proxy unit file:
+
+	cat << EOF | sudo tee /etc/systemd/system/kube-proxy.service
+	[Unit]
+	Description=Kubernetes Kube Proxy
+	Documentation=https://github.com/kubernetes/kubernetes
+
+	[Service]
+	ExecStart=/usr/local/bin/kube-proxy \\
+	  --config=/var/lib/kube-proxy/kube-proxy-config.yaml
+	Restart=on-failure
+	RestartSec=5
+
+	[Install]
+	WantedBy=multi-user.target
+	EOF
+
+	Now you are ready to start up the worker node services! Run these:
+
+
+	sudo systemctl daemon-reload
+	sudo systemctl enable containerd kubelet kube-proxy
+	sudo systemctl start containerd kubelet kube-proxy
+
+	Check the status of each service to make sure they are all active (running) on both worker nodes:
+
+	sudo systemctl status containerd kubelet kube-proxy
+	
+	**** i think since v1.16.3 --kubeconfig is not a valid argument to kube-proxy as they have been deprecated; see below:
+	
+	[Service]
+	ExecStart=/usr/local/bin/kube-proxy \
+	  --cluster-cidr="10.200.0.0/16" \
+	  --kubeconfig="/var/lib/kube-proxy/kubeconfig" \
+	  --proxy-mode="iptables"
+	Restart=on-failure
+	RestartSec=5
+
+	[Install]
+	WantedBy=multi-user.target
+	cloud_user@chaitanyah3683c:/var/lib/kube-proxy$ /usr/local/bin/kube-proxy
+	W0219 02:58:06.663478   19132 server.go:208] WARNING: all flags other than --config, --write-config-to, and --cleanup are deprecated. Please begin using a config file ASAP.
+	I0219 02:58:06.678201   19132 server.go:494] Neither kubeconfig file nor master URL was specified. Falling back to in-cluster config.
+	F0219 02:58:06.678227   19132 server.go:443] unable to load in-cluster configuration, KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be defined
+	cloud_user@chaitanyah3683c:/var/lib/kube-proxy$ /usr/local/bin/kube-proxy --version
+	Kubernetes v1.16.3
+	cloud_user@chaitanyah3683c:/var/lib/kube-proxy$
+
+	**noticed the kubecofig for kube-proxy had user defined as sytem:kube-proxy and was showing errors in syslog 
+	as system:anonymous cant access endpoint on api v1. tip for future. 
+	
+	**had typos in kubeconfig causing issues with kubelet and kube-proxy starting up.
+	identified using understanding system:anonymous as authentication attempt in syslog.
+
+
+	Finally, verify that both workers have registered themselves with the cluster. Log in to one of your control nodes and run this:
+
+	kubectl get nodes
+
+	You should see the hostnames for both worker nodes listed. Note that it is expected for them to be in the NotReady state at this point.
+
+	**notice here that u dont yet see the controller nodes in the output of kubectl get nodes.
+	
+configuring kubectl on workstation to access the cluster:
+	copied admin.kubeconfig into ~/.kube/config and thats it.
+
+
+kubernetes networking model:
+	docker allows containers to communicate with one another using a virtual network bridge configured on the host.
+	each host has its own virutal network serving all the contaienrs on the host.
+	to serve containers on another host, a proxy from the host to the container needs to be opened. 
+	these are other limitations were attempted to be improved within the kubernetes nw model.
+	
+	kubernetes bas a virtual network at a cluster level.
+	each service has a unique ip that is in a different range than pod ips.
+	within a cluster, any pod can talk to any other pod in general. |||ly, any pod can talk to any service in general.
+	
+cluster nw architecture:
+	cluster cidr
+	service cidr shouldnt overlap with the cluster cidr range.
+	pod cidr
+		ip range for pods on a specific worker node. this range should fall within the cluster cidr but not overlap with the pod cidr of any other worker node.
+		in this course, our networking plugin will automatically handle ip allocation to nodes, so we do not need to manually set a pod cidr.
+	to implement networking, we will be using weave net.
+	
+
+installing weave net:
+
+	We are now ready to set up networking in our Kubernetes cluster. This lesson guides you through the process of installing Weave Net in the cluster. 
+	It also shows you how to test your cluster network to make sure that everything is working as expected so far. 
+	After completing this lesson, you should have a functioning cluster network within your Kubernetes cluster.
+
+	You can configure Weave Net like this:
+
+	First, log in to both worker nodes and enable IP forwarding:
+
+	sudo sysctl net.ipv4.conf.all.forwarding=1
+	echo "net.ipv4.conf.all.forwarding=1" | sudo tee -a /etc/sysctl.conf
+
+	Install Weave Net like this:
+
+	to run against the api:
+	kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')&env.IPALLOC_RANGE=10.200.0.0/16"
+	
+	$ kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')&env.IPALLOC_RANGE=10.200.0.0/16"
+	serviceaccount/weave-net created
+	clusterrole.rbac.authorization.k8s.io/weave-net created
+	clusterrolebinding.rbac.authorization.k8s.io/weave-net created
+	role.rbac.authorization.k8s.io/weave-net created
+	rolebinding.rbac.authorization.k8s.io/weave-net created
+	daemonset.apps/weave-net created
+
+	Now Weave Net is installed, but we need to test our network to make sure everything is working.
+
+	First, make sure the Weave Net pods are up and running:
+
+	kubectl get pods -n kube-system
+
+	This should return two Weave Net pods, and look something like this:
+
+	NAME              READY     STATUS    RESTARTS   AGE
+	weave-net-m69xq   2/2       Running   0          11s
+	weave-net-vmb2n   2/2       Running   0          11s
+
+	Next, we want to test that pods can connect to each other and that they can connect to services. We will set up two Nginx pods and a service for those two pods. Then, we will create a busybox pod and use it to test connectivity to both Nginx pods and the service.
+
+	First, create an Nginx deployment with 2 replicas:
+
+	cat << EOF | kubectl apply -f -
+	apiVersion: apps/v1
+	kind: Deployment
+	metadata:
+	  name: nginx
+	spec:
+	  selector:
+		matchLabels:
+		  run: nginx
+	  replicas: 2
+	  template:
+		metadata:
+		  labels:
+			run: nginx
+		spec:
+		  containers:
+		  - name: my-nginx
+			image: nginx
+			ports:
+			- containerPort: 80
+	EOF
+
+	Next, create a service for that deployment so that we can test connectivity to services as well:
+
+	kubectl expose deployment/nginx
+
+	Now let's start up another pod. We will use this pod to test our networking. We will test whether we can connect to the other pods and services from this pod.
+
+	kubectl run busybox --image=radial/busyboxplus:curl --command -- sleep 3600
+	POD_NAME=$(kubectl get pods -l run=busybox -o jsonpath="{.items[0].metadata.name}")
+
+	Now let's get the IP addresses of our two Nginx pods:
+
+	kubectl get ep nginx
+
+	There should be two IP addresses listed under ENDPOINTS, for example:
+
+	NAME      ENDPOINTS                       AGE
+	nginx     10.200.0.2:80,10.200.128.1:80   50m
+
+	Now let's make sure the busybox pod can connect to the Nginx pods on both of those IP addresses.
+
+	kubectl exec $POD_NAME -- curl <first nginx pod IP address>
+	kubectl exec $POD_NAME -- curl <second nginx pod IP address>
+
+	Both commands should return some HTML with the title "Welcome to Nginx!" This means that we can successfully connect to other pods.
+
+	Now let's verify that we can connect to services.
+
+	kubectl get svc
+
+	This should display the IP address for our Nginx service. For example, in this case, the IP is 10.32.0.54:
+
+	NAME         TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+	kubernetes   ClusterIP   10.32.0.1    <none>        443/TCP   1h
+	nginx        ClusterIP   10.32.0.54   <none>        80/TCP    53m
+
+	Let's see if we can access the service from the busybox pod!
+
+	kubectl exec $POD_NAME -- curl <nginx service IP address>
+
+	This should also return HTML with the title "Welcome to Nginx!"
+
+	This means that we have successfully reached the Nginx service from inside a pod and that our networking configuration is working!
+
+	
+dns in a kubernetes pod network:
+	provides a dns service to be used by the pods within the cluster.
+	configures containers to use the dns services to perform dns lookups.
+	
+	
+kube-dns to the cluster:
+	Kube-dns is an easy-to-use solution for providing DNS service in a Kubernetes cluster. This lesson guides you through the process of installing kube-dns in your cluster, as well as testing your DNS setup to make sure that it is working. After completing this lesson, you should have a working kube-dns installation in your cluster, and pods should be able to successfully use your DNS.
+
+	To install and test kube-dns, you will need to use kubectl. To connect with kubectl, you can either log in to one of the control nodes and run kubectl there, or open an SSH tunnel for port 6443 to the load balancer server and use kubectl locally.
+
+	You can open the SSH tunnel by running this in a separate terminal. Leave the session open while you are working to keep the tunnel active:
+
+	ssh -L 6443:localhost:6443 user@<your Load balancer cloud server public IP>
+
+	You can install kube-dns like so:
+
+	kubectl create -f https://storage.googleapis.com/kubernetes-the-hard-way/kube-dns.yaml
+
+	Verify that the kube-dns pod starts up correctly:
+
+	kubectl get pods -l k8s-app=kube-dns -n kube-system
+
+	You should get output showing the kube-dns pod. It should look something like this:
+
+	NAME                        READY     STATUS    RESTARTS   AGE
+	kube-dns-598d7bf7d4-spbmj   3/3       Running   0          36s
+
+	Make sure that 3/3 containers are ready, and that the pod has a status of Running. It may take a moment for the pod to be fully up and running, so if READY is not 3/3 at first, check again after a few moments.
+
+	Now let's test our kube-dns installation by doing a DNS lookup from within a pod. First, we need to start up a pod that we can use for testing:
+
+	kubectl run busybox --image=busybox:1.28 --command -- sleep 3600
+	POD_NAME=$(kubectl get pods -l run=busybox -o jsonpath="{.items[0].metadata.name}")
+
+	Next, run an nslookup from inside the busybox container:
+
+	kubectl exec -ti $POD_NAME -- nslookup kubernetes
+
+	You should get output that looks something like this:
+
+	Server:    10.32.0.10
+	Address 1: 10.32.0.10 kube-dns.kube-system.svc.cluster.local
+
+	Name:      kubernetes
+	Address 1: 10.32.0.1 kubernetes.default.svc.cluster.local
+
+	If nslookup succeeds, then your kube-dns installation is working!
+
+
+	Once you are done, it's probably a good idea to clean up the the objects that were created for testing:
+
+	kubectl delete deployment busybox
+
+	notice that after networking is setup, both the nodes show up on the get nodes api output as status=ready:
+	$ kubectl get nodes 
+	NAME                              STATUS    ROLES     AGE       VERSION
+	chaitanyah3683c.mylabserver.com   Ready     <none>    3h        v1.10.2
+	chaitanyah3685c.mylabserver.com   Ready     <none>    3h        v1.10.2
+
+
+smoke testing is done. regualr stuff, not documenting. 
+
+i noticed that although kube-apiserver was contacting kubelet on the worker ndoes to provision pods correctly;
+exec and logs and other commands were failing as they need to talk to the container runtime - was showing an error pasted below.
+discoverd that i idnt configure containerd on the worker nodes.
+
+$ kubectl logs busybox-2-7bd5cc5fd9-ssc27
+Error from server: Get https://172.31.26.74:10250/containerLogs/default/busybox-2-7bd5cc5fd9-ssc27/busybox-2: x509: cannot validate certificate for 172.31.26.74 because it doesn't contain any IP SANs
+cloud_user@chaitanyah3686c:~/kube-hard-way$ kubectl exec -it busybox-2-7bd5cc5fd9-ssc27 -- sh
+Error from server: error dialing backend: x509: cannot validate certificate for 172.31.26.74 because it doesn't contain any IP SANs
+cloud_user@chaitanyah3686c:~/kube-hard-way$ 
+
+
+had to do daemon-reload and stop and start containerd kubelet and kube-proxy on worker nodes. nodes were showing up as notready and with taint noschedule before.
+containerd was to blame for exec and logs not working as expected before. 
+--hostname-override needed to be adjusted in kubelet systemd file to ensure they interact with the hostname as identification.
+
